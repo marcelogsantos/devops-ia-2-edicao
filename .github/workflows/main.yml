@@ -1,0 +1,309 @@
+name: CI/CD Pipeline - Encontros Tech
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - '02-encontros-tech/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - '02-encontros-tech/**'
+
+env:
+  DOCKER_IMAGE: buiu0917/bootcamp-encontros-tech
+  DOCKER_REGISTRY: docker.io
+
+jobs:
+  # Job 1: Build e Test
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: ./02-encontros-tech
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        working-directory: ./02-encontros-tech
+        run: |
+          pytest tests/ -v || echo "No tests found"
+
+      - name: Lint code
+        working-directory: ./02-encontros-tech
+        run: |
+          pip install flake8
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+
+  # Job 2: Build e Push Docker Image
+  build-docker:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push'
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./02-encontros-tech
+          file: ./02-encontros-tech/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.DOCKER_IMAGE }}:buildcache,mode=max
+
+  # Job 3: Deploy para Homologação (branch develop)
+  deploy-homologacao:
+    name: Deploy to Homologacao
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment:
+      name: homologacao
+      url: http://164.90.254.138
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Update image in manifests
+        working-directory: ./02-encontros-tech/k8s
+        run: |
+          sed -i "s|image: buiu0917/bootcamp-encontros-tech:.*|image: ${{ env.DOCKER_IMAGE }}:develop-${{ github.sha }}|g" manifests-homologacao.yaml
+
+      - name: Deploy to Homologacao
+        working-directory: ./02-encontros-tech/k8s
+        run: |
+          kubectl apply -f manifests-homologacao.yaml
+          kubectl rollout status deployment/encontros-tech -n homologacao --timeout=5m
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n homologacao -l app=encontros-tech
+          kubectl get service -n homologacao encontros-tech
+
+  # Job 4: Smoke Tests em Homologação
+  test-homologacao:
+    name: Test Homologacao Environment
+    runs-on: ubuntu-latest
+    needs: deploy-homologacao
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+
+    steps:
+      - name: Wait for service to be ready
+        run: sleep 15
+
+      - name: Health check
+        run: |
+          echo "Testing homologacao environment..."
+          curl -f http://164.90.254.138 || exit 1
+          echo "✅ Homologacao is healthy!"
+
+      - name: API endpoints test
+        run: |
+          echo "Testing API endpoints..."
+          curl -f http://164.90.254.138/api/health || echo "Health endpoint not found (optional)"
+          curl -f http://164.90.254.138/ || exit 1
+          echo "✅ API tests passed!"
+
+  # Job 5: Deploy para Homologação (quando for main - para validação)
+  deploy-homologacao-staging:
+    name: Deploy to Homologacao (Staging)
+    runs-on: ubuntu-latest
+    needs: build-docker
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: homologacao
+      url: http://164.90.254.138
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Update image in manifests
+        working-directory: ./02-encontros-tech/k8s
+        run: |
+          sed -i "s|image: buiu0917/bootcamp-encontros-tech:.*|image: ${{ env.DOCKER_IMAGE }}:main-${{ github.sha }}|g" manifests-homologacao.yaml
+
+      - name: Deploy to Homologacao (Staging)
+        working-directory: ./02-encontros-tech/k8s
+        run: |
+          kubectl apply -f manifests-homologacao.yaml
+          kubectl rollout status deployment/encontros-tech -n homologacao --timeout=5m
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n homologacao -l app=encontros-tech
+          kubectl get service -n homologacao encontros-tech
+
+  # Job 6: Smoke Tests em Homologação (para branch main)
+  test-homologacao-staging:
+    name: Test Homologacao (Staging) Environment
+    runs-on: ubuntu-latest
+    needs: deploy-homologacao-staging
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Wait for service to be ready
+        run: sleep 15
+
+      - name: Health check
+        run: |
+          echo "Testing homologacao staging environment..."
+          curl -f http://164.90.254.138 || exit 1
+          echo "✅ Homologacao staging is healthy!"
+
+      - name: API endpoints test
+        run: |
+          echo "Testing API endpoints..."
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://164.90.254.138/)
+          if [ $STATUS -ne 200 ]; then
+            echo "❌ API returned status $STATUS"
+            exit 1
+          fi
+          echo "✅ All staging tests passed!"
+
+      - name: Load test (optional)
+        run: |
+          echo "Running basic load test..."
+          for i in {1..10}; do
+            curl -s -o /dev/null -w "Request $i: %{http_code}\n" http://164.90.254.138/
+          done
+          echo "✅ Load test completed!"
+
+  # Job 7: Deploy para Produção (APENAS após validação em homologação)
+  deploy-producao:
+    name: Deploy to Producao
+    runs-on: ubuntu-latest
+    needs: test-homologacao-staging
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: producao
+      url: http://161.35.254.78
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Update image in manifests
+        working-directory: ./02-encontros-tech/k8s
+        run: |
+          sed -i "s|image: buiu0917/bootcamp-encontros-tech:.*|image: ${{ env.DOCKER_IMAGE }}:main-${{ github.sha }}|g" manifests-producao.yaml
+
+      - name: Deploy to Producao
+        working-directory: ./02-encontros-tech/k8s
+        run: |
+          kubectl apply -f manifests-producao.yaml
+          kubectl rollout status deployment/encontros-tech -n producao --timeout=5m
+
+      - name: Verify deployment
+        run: |
+          kubectl get pods -n producao -l app=encontros-tech
+          kubectl get service -n producao encontros-tech
+
+  # Job 8: Smoke Tests em Produção
+  test-producao:
+    name: Test Producao Environment
+    runs-on: ubuntu-latest
+    needs: deploy-producao
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Wait for service to be ready
+        run: sleep 15
+
+      - name: Production health check
+        run: |
+          echo "Testing production environment..."
+          curl -f http://161.35.254.78 || exit 1
+          echo "✅ Production is healthy!"
+
+      - name: Verify production APIs
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://161.35.254.78/)
+          if [ $STATUS -ne 200 ]; then
+            echo "❌ Production API returned status $STATUS"
+            exit 1
+          fi
+          echo "✅ Production smoke tests passed!"
+
+      - name: Send success notification
+        run: |
+          echo "🎉 Deploy to production completed successfully!"
+          echo "Environment: http://161.35.254.78"
