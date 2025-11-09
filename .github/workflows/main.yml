@@ -2,15 +2,11 @@ name: CI/CD Pipeline - Encontros Tech
 
 on:
   push:
-    branches:
-      - main
-      - develop
+    branches: [ main, develop ]
     paths:
       - '02-encontros-tech/**'
   pull_request:
-    branches:
-      - main
-      - develop
+    branches: [ main, develop ]
     paths:
       - '02-encontros-tech/**'
 
@@ -114,11 +110,25 @@ jobs:
         with:
           version: 'latest'
 
-      - name: Configure kubectl
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DO_PAT }}
+
+      - name: Fetch kubeconfig from DigitalOcean
         run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+          doctl kubernetes cluster kubeconfig save do-nyc1-k8s-bootcamp2 --expiry-seconds 600
+          kubectl config use-context do-nyc1-k8s-bootcamp2
+
+      - name: Preflight
+        run: |
+          kubectl version --client
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Ensure namespace exists
+        run: |
+          kubectl get ns homologacao >/dev/null 2>&1 || kubectl create ns homologacao
 
       - name: Update image in manifests
         working-directory: ./02-encontros-tech/k8s
@@ -160,7 +170,7 @@ jobs:
           curl -f http://164.90.254.138/ || exit 1
           echo "✅ API tests passed!"
 
-  # Job 5: Deploy para Homologação (quando for main - para validação)
+  # Job 5: Deploy para Homologação (branch main)
   deploy-homologacao-staging:
     name: Deploy to Homologacao (Staging)
     runs-on: ubuntu-latest
@@ -179,11 +189,25 @@ jobs:
         with:
           version: 'latest'
 
-      - name: Configure kubectl
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DO_PAT }}
+
+      - name: Fetch kubeconfig from DigitalOcean
         run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+          doctl kubernetes cluster kubeconfig save do-nyc1-k8s-bootcamp2 --expiry-seconds 600
+          kubectl config use-context do-nyc1-k8s-bootcamp2
+
+      - name: Preflight
+        run: |
+          kubectl version --client
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Ensure namespace exists
+        run: |
+          kubectl get ns homologacao >/dev/null 2>&1 || kubectl create ns homologacao
 
       - name: Update image in manifests
         working-directory: ./02-encontros-tech/k8s
@@ -201,9 +225,9 @@ jobs:
           kubectl get pods -n homologacao -l app=encontros-tech
           kubectl get service -n homologacao encontros-tech
 
-  # Job 6: Smoke Tests em Homologação (para branch main)
+  # Job 6: Smoke Tests em Homologação (Staging)
   test-homologacao-staging:
-    name: Test Homologacao (Staging) Environment
+    name: Test Homologacao (Staging)
     runs-on: ubuntu-latest
     needs: deploy-homologacao-staging
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -214,13 +238,12 @@ jobs:
 
       - name: Health check
         run: |
-          echo "Testing homologacao staging environment..."
+          echo "Testing homologacao staging..."
           curl -f http://164.90.254.138 || exit 1
           echo "✅ Homologacao staging is healthy!"
 
       - name: API endpoints test
         run: |
-          echo "Testing API endpoints..."
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://164.90.254.138/)
           if [ $STATUS -ne 200 ]; then
             echo "❌ API returned status $STATUS"
@@ -228,15 +251,7 @@ jobs:
           fi
           echo "✅ All staging tests passed!"
 
-      - name: Load test (optional)
-        run: |
-          echo "Running basic load test..."
-          for i in {1..10}; do
-            curl -s -o /dev/null -w "Request $i: %{http_code}\n" http://164.90.254.138/
-          done
-          echo "✅ Load test completed!"
-
-  # Job 7: Deploy para Produção (APENAS após validação em homologação)
+  # Job 7: Deploy para Produção
   deploy-producao:
     name: Deploy to Producao
     runs-on: ubuntu-latest
@@ -255,11 +270,25 @@ jobs:
         with:
           version: 'latest'
 
-      - name: Configure kubectl
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DO_PAT }}
+
+      - name: Fetch kubeconfig from DigitalOcean
         run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBECONFIG }}" | base64 -d > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+          doctl kubernetes cluster kubeconfig save do-nyc1-k8s-bootcamp2 --expiry-seconds 600
+          kubectl config use-context do-nyc1-k8s-bootcamp2
+
+      - name: Preflight
+        run: |
+          kubectl version --client
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Ensure namespace exists
+        run: |
+          kubectl get ns producao >/dev/null 2>&1 || kubectl create ns producao
 
       - name: Update image in manifests
         working-directory: ./02-encontros-tech/k8s
