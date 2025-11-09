@@ -2,17 +2,21 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: encontros-tech
+  namespace: producao
   labels:
     app: encontros-tech
+    environment: producao
 spec:
   replicas: 2
   selector:
     matchLabels:
       app: encontros-tech
+      environment: producao
   template:
     metadata:
       labels:
         app: encontros-tech
+        environment: producao
     spec:
       imagePullSecrets:
       - name: dockerhub-secret
@@ -26,9 +30,9 @@ spec:
           valueFrom:
             secretKeyRef:
               name: db-credentials
-              key: database-url
+              key: producao-url
         - name: APP_TITLE
-          value: "Encontros Tech"
+          value: "Encontros Tech - Producao"
         - name: DEBUG
           value: "false"
         - name: HOST
@@ -40,7 +44,7 @@ spec:
         - name: LOG_FORMAT
           value: "simple"
         - name: SERVICE_NAME
-          value: "encontros-tech"
+          value: "encontros-tech-producao"
         - name: SERVICE_VERSION
           value: "1.0.0"
         - name: PROMETHEUS_MULTIPROC_DIR
@@ -50,8 +54,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: encontros-tech
+  namespace: producao
   labels:
     app: encontros-tech
+    environment: producao
 spec:
   type: LoadBalancer
   ports:
@@ -60,3 +66,4 @@ spec:
     protocol: TCP
   selector:
     app: encontros-tech
+    environment: producao
